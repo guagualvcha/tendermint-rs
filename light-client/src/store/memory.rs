@@ -73,6 +73,14 @@ impl LightStore for MemoryStore {
             .map(|(_, e)| e.light_block.clone())
     }
 
+    fn lowest(&self, status: Status) -> Option<LightBlock> {
+        self.store
+            .iter()
+            .filter(|(_, e)| e.status == status)
+            .min_by_key(|(&height, _)| height)
+            .map(|(_, e)| e.light_block.clone())
+    }
+
     fn all(&self, status: Status) -> Box<dyn Iterator<Item = LightBlock>> {
         let light_blocks: Vec<_> = self
             .store

@@ -41,6 +41,9 @@ pub trait LightStore: Debug + Send + Sync {
     /// Get the light block of greatest height with the given status.
     fn latest(&self, status: Status) -> Option<LightBlock>;
 
+    /// Get the light block of lowest height with the given status.
+    fn lowest(&self, status: Status) -> Option<LightBlock>;
+
     /// Get an iterator of all light blocks with the given status.
     fn all(&self, status: Status) -> Box<dyn Iterator<Item = LightBlock>>;
 
@@ -68,6 +71,16 @@ pub trait LightStore: Debug + Send + Sync {
 
         std_ext::option::select(latest_trusted, latest_verified, |t, v| {
             std_ext::cmp::max_by_key(t, v, |lb| lb.height())
+        })
+    }
+
+    /// Get the light block of lowest height with the trusted or verified status.
+    fn lowest_trusted_or_verified(&self) -> Option<LightBlock> {
+        let oldest_trusted = self.lowest(Status::Trusted);
+        let oldest_verified = self.lowest(Status::Verified);
+
+        std_ext::option::select(oldest_trusted, oldest_verified, |t, v| {
+            std_ext::cmp::min_by_key(t, v, |lb| lb.height())
         })
     }
 
