@@ -6,7 +6,6 @@
 
 #![cfg_attr(docsrs, feature(doc_cfg))]
 #![deny(
-    warnings,
     missing_docs,
     trivial_casts,
     trivial_numeric_casts,
