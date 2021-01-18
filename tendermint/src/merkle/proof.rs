@@ -2,7 +2,10 @@
 use serde::{Deserialize, Serialize};
 use std::convert::TryFrom;
 
-use tendermint_proto::crypto::{IavlValueProofOp, ProofOp as RawProofOp, MultiStoreProofOp};
+use tendermint_proto::crypto::{
+    IavlValueProofOp, MultiStoreProof, MultiStoreProofOp, PathToLeaf, ProofInnerNode,
+    ProofLeafNode, ProofOp as RawProofOp, StoreInfo,
+};
 use tendermint_proto::crypto::{ProofOps as RawProofOps, RangeProof};
 use tendermint_proto::Protobuf;
 
@@ -10,12 +13,18 @@ use crate::serializers;
 use crate::Error;
 use bstr::ByteSlice;
 use prost::Message;
+use sha2::{Digest, Sha256};
 use std::io::Cursor;
 
 use prost_amino::Message as _;
 
+use crate::hash::SHA256_HASH_SIZE;
+use crate::merkle::{simple_hash_from_byte_vectors, Hash};
 use byteorder::{BigEndian, ReadBytesExt};
 use parity_bytes::BytesRef;
+use prost_amino::encoding::encode_varint;
+use std::cmp::Ordering::Equal;
+use std::fs::read;
 
 const PRECOMPILE_CONTRACT_INPUT_METADATA_LENGTH: usize = 32;
 const MERKLE_PROOF_VALIDATE_RESULT_LENGTH: usize = 32;
@@ -95,17 +104,247 @@ impl From<Proof> for RawProofOps {
     }
 }
 
-trait ProofExecute {
-    fn run(value: Vec<Vec<u8>>,key:Vec<u8>) -> Result<Vec<Vec<u8>>, &'static str>;
+trait NodeHash {
+    fn NodeHash(&self) -> Hash;
+    fn ChildNodeHash(&self, child_hash: Hash) -> Hash;
 }
-impl IavlValueProofOp {
-    fn ComputeRootHash(){
 
+impl NodeHash for ProofInnerNode {
+    fn NodeHash(&self) -> Hash {
+        unimplemented!()
+    }
+
+    fn ChildNodeHash(&self, child_hash: Hash) -> Hash {
+        let mut inner_bytes: Vec<u8> = Vec::with_capacity(100);
+        let mut h = (self.height as u64) << 1;
+        if self.height < 0 {
+            h = !h;
+        }
+        encode_varint(h, &mut inner_bytes);
+        encode_varint((self.size as u64) << 1, &mut inner_bytes);
+        encode_varint((self.version as u64) << 1, &mut inner_bytes);
+        if self.left.is_empty() {
+            encode_varint(child_hash.len() as u64, &mut inner_bytes);
+            inner_bytes.extend_from_slice(&child_hash[..]);
+            encode_varint(self.right.len() as u64, &mut inner_bytes);
+            inner_bytes.extend_from_slice(&self.right);
+        } else {
+            encode_varint(self.left.len() as u64, &mut inner_bytes);
+            inner_bytes.extend_from_slice(&self.left);
+            encode_varint(child_hash.len() as u64, &mut inner_bytes);
+            inner_bytes.extend_from_slice(&child_hash[..]);
+        }
+        let digest = Sha256::digest(&inner_bytes);
+        let mut hash_bytes = [0u8; SHA256_HASH_SIZE];
+        hash_bytes.copy_from_slice(&digest);
+        hash_bytes
     }
 }
-impl ProofExecute for IavlValueProofOp{
-    fn run(value: Vec<u8>, key:Vec<u8>) -> Result<Vec<u8>, &'static str> {
 
+fn computePathLeafHash(path_to_leaf: &PathToLeaf, leaf: &ProofLeafNode) -> Hash {
+    let mut hash = leaf.NodeHash();
+    let n = path_to_leaf.inners.len();
+    for i in 0..n {
+        let pin = path_to_leaf.inners.get(n - i - 1).unwrap();
+        hash = pin.ChildNodeHash(hash);
+    }
+    return hash;
+}
+
+impl NodeHash for ProofLeafNode {
+    fn NodeHash(&self) -> Hash {
+        let mut leaf_bytes: Vec<u8> = Vec::with_capacity(100);
+        encode_varint(0_u64, &mut leaf_bytes);
+        encode_varint(1_u64 << 1, &mut leaf_bytes);
+        encode_varint((self.version as u64) << 1, &mut leaf_bytes);
+        encode_varint(self.key.len() as u64, &mut leaf_bytes);
+        leaf_bytes.extend_from_slice(&self.key);
+        encode_varint(self.value_hash.len() as u64, &mut leaf_bytes);
+        leaf_bytes.extend_from_slice(&self.value_hash);
+        let digest = Sha256::digest(&leaf_bytes);
+
+        // copy the GenericArray out
+        let mut hash_bytes = [0u8; SHA256_HASH_SIZE];
+        hash_bytes.copy_from_slice(&digest);
+        hash_bytes
+    }
+
+    fn ChildNodeHash(&self, _: Hash) -> Hash {
+        unimplemented!()
+    }
+}
+
+trait ProofExecute {
+    fn run(&self, value: Vec<u8>, key: Vec<u8>) -> Result<Hash, &'static str>;
+}
+
+struct RangeProofVerifier {
+    proof: RangeProof,
+}
+
+struct MultiStoreProofVerifier {
+    proof: MultiStoreProof,
+}
+
+impl MultiStoreProofVerifier {
+    fn store_info_hash(s: &StoreInfo) -> Hash {
+        let mut wire = Vec::new();
+        s.core.as_ref().unwrap().encode_length_delimited(&mut wire);
+        let tmp_hash = Sha256::digest(wire.as_slice());
+        let mut hash = [0u8; SHA256_HASH_SIZE];
+        hash.copy_from_slice(&tmp_hash);
+        hash
+    }
+    pub fn compute_root_hash(&mut self) -> Result<Hash, &'static str> {
+        let mut kvs = Vec::new();
+        struct KVPair {
+            Key: Vec<u8>,
+            Value: Vec<u8>,
+        }
+        for store in self.proof.store_infos.iter() {
+            let tmp_hash = Sha256::digest(
+                MultiStoreProofVerifier::store_info_hash(&store)
+                    .to_vec()
+                    .as_slice(),
+            );
+            let mut store_hash = [0u8; SHA256_HASH_SIZE];
+            store_hash.copy_from_slice(&tmp_hash);
+            kvs.push(KVPair {
+                Key: store.name.clone().into_bytes(),
+                Value: store_hash.to_vec(),
+            })
+        }
+        kvs.sort_by(|a, b| {
+            let x = a.Key.cmp(&b.Key);
+            if x == Equal {
+                a.Value.cmp(&b.Value)
+            } else {
+                x
+            }
+        });
+
+        let kvs_bytes: Vec<Vec<u8>> = kvs
+            .iter()
+            .map(|kv| {
+                let mut kv_bytes: Vec<u8> = Vec::new();
+                encode_varint(kv.Key.len() as u64, &mut kv_bytes);
+                kv_bytes.extend_from_slice(&kv.Key);
+                encode_varint(kv.Value.len() as u64, &mut kv_bytes);
+                kv_bytes.extend_from_slice(&kv.Value);
+                kv_bytes
+            })
+            .collect();
+
+        Ok(simple_hash_from_byte_vectors(kvs_bytes))
+    }
+}
+
+impl RangeProofVerifier {
+    fn verify_item(&self, key: Vec<u8>, value: Vec<u8>) -> Result<(), &'static str> {
+        let leaves = &self.proof.leaves;
+        let i = match leaves.binary_search_by(|probe| probe.key.cmp(&key)) {
+            Ok(index) => index,
+            Err(index) => index,
+        };
+        let elemant = leaves.get(i).unwrap();
+        if i >= leaves.len() || !elemant.key.eq(&key) {
+            return Err("leaf key not found in proof");
+        }
+        let value_hash = Sha256::digest(value.as_slice());
+        let mut hash_bytes = [0u8; SHA256_HASH_SIZE];
+        hash_bytes.copy_from_slice(&value_hash);
+        if !elemant.value_hash.eq(&hash_bytes) {
+            return Err("leaf value hash not same");
+        }
+        return Ok(());
+    }
+
+    fn ite_compute_root_hash(
+        leaves: &[ProofLeafNode],
+        innersq: &Vec<PathToLeaf>,
+        mut path: PathToLeaf,
+    ) -> (Result<Hash, &'static str>, bool) {
+        let nleaf = &leaves[0];
+        let rleaves = &leaves[1..];
+
+        let hash = computePathLeafHash(&path, nleaf);
+        if rleaves.is_empty() {
+            return (Ok(hash), true);
+        }
+        while !path.inners.is_empty() {
+            let rpath = path.inners[..path.inners.len() - 1].to_vec().clone();
+            let lpath = path.inners[path.inners.len() - 1].clone();
+            path.inners = rpath;
+            if lpath.right.is_empty() {
+                continue;
+            }
+            let mut inners: PathToLeaf = innersq[0].clone();
+            let rinnersq = &innersq[1..].to_vec();
+            let (derived_root, done) =
+                RangeProofVerifier::ite_compute_root_hash(rleaves, rinnersq, inners);
+            if derived_root.is_err() {
+                return (derived_root, false);
+            }
+            if !derived_root.unwrap().eq(&lpath.right.as_slice()) {
+                return (Err("intermediate root hash doesn't match"), false);
+            }
+            if done {
+                return (Ok(hash), true);
+            }
+        }
+        return (Ok(hash), false);
+    }
+
+    pub fn compute_root_hash(&mut self) -> Result<Hash, &'static str> {
+        let leaves = self.proof.leaves.clone();
+        if leaves.len() == 0 {
+            return Err("no leaves");
+        }
+        if self.proof.inner_nodes.len() + 1 != leaves.len() {
+            return Err("InnerNodes vs Leaves length mismatch, leaves should be 1 more.");
+        }
+        let mut ite_leaves = leaves.as_slice();
+        let mut innersq = &self.proof.inner_nodes;
+        let mut path = PathToLeaf {
+            inners: self.proof.left_path.clone(),
+        };
+        let (root_hash, done) =
+            RangeProofVerifier::ite_compute_root_hash(ite_leaves, innersq, path);
+        if !done {
+            return Err("left over leaves -- malformed proof");
+        }
+        return root_hash;
+    }
+
+    fn proof_leaf_node_hash() {}
+}
+
+impl ProofExecute for IavlValueProofOp {
+    fn run(&self, value: Vec<u8>, key: Vec<u8>) -> Result<Hash, &'static str> {
+        let mut verifier = RangeProofVerifier {
+            proof: self.proof.as_ref().unwrap().clone(),
+        };
+        let root_hash = verifier.compute_root_hash()?;
+        verifier.verify_item(key, value)?;
+        return Ok(root_hash);
+    }
+}
+
+impl ProofExecute for MultiStoreProofOp {
+    fn run(&self, value: Vec<u8>, key: Vec<u8>) -> Result<Hash, &'static str> {
+        let mut verifier = MultiStoreProofVerifier {
+            proof: self.proof.as_ref().unwrap().clone(),
+        };
+        let root_hash = verifier.compute_root_hash()?;
+        for si in self.proof.as_ref().unwrap().store_infos.iter() {
+            if si.name.as_bytes() == key.as_slice() {
+                if value == si.core.as_ref().unwrap().commit_id.as_ref().unwrap().hash {
+                    return Ok(root_hash);
+                }
+                return Err("hash mismatch for substore");
+            }
+        }
+        return Err("key not found in multistore proof");
     }
 }
 
@@ -131,16 +370,25 @@ impl KeyValueMerkleProof {
         if iavl_op.field_type != "iavl:v" {
             return false;
         }
-        let iavl_proof = IavlValueProofOp::decode_length_delimited(&iavl_op.data[..]);
-
-
-
+        let iavl_proof = IavlValueProofOp::decodedecode_length_delimited(&iavl_op.data[..]).unwrap();
+        let iavl_hash: Result<Hash, &'static str> =
+            iavl_proof.run(self.value.clone(), self.key.clone());
+        if iavl_hash.is_err() {
+            return false;
+        }
         let mul_op = self.proof.ops.get(1).unwrap();
         if mul_op.field_type != "multistore" {
             return false;
         }
-        let mul_proof = MultiStoreProofOp::decode_length_delimited(&mul_op.data[..]);
-        println!("{:?}", mul_proof);
+        let mul_proof = MultiStoreProofOp::decode_length_delimited(&mul_op.data[..]).unwrap();
+        let mul_root_hash: Result<Hash, &'static str> =
+            mul_proof.run(iavl_hash.unwrap().to_vec(), self.store_name.clone());
+        if mul_root_hash.is_err() {
+            return false;
+        }
+        if mul_root_hash.unwrap().to_vec() != self.app_hash {
+            return false;
+        }
         return true;
     }
 }
@@ -242,50 +490,47 @@ mod test {
     use parity_bytes::BytesRef;
     use prost_amino::Message as _;
     // use prost::Message as _;
+    use crate::merkle::proof::NodeHash;
     use tendermint_proto::crypto::{
         IavlValueProofOp, PathToLeaf, ProofInnerNode, ProofLeafNode, RangeProof,
     };
 
     #[test]
-    fn test_execute() {
-        let input = hex::decode("00000000000000000000000000000000000000000000000000000000000007306163630000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001c6163636f756e743a8a4e2eb018bdf98a8f53ec755740ffc728637a1d000000000000000000000000000000000000000000000000000000000000007b4bdc4c270a750a148a4e2eb018bdf98a8f53ec755740ffc728637a1d12110a0941544348412d3733301080f69bf321120b0a03424e4210e8baeb8d44120f0a075050432d303041108094ebdc031a26eb5ae98721031c199c92e5b0080967da99be27cf2da53317441b4a663e6d9c6caf02be1fdbdc20d7962b28152c69c314b4de5c8035253c8bc0771d9ca17b1b23a57c0c6d068b57579791cae20add070a066961766c3a76121c6163636f756e743a8a4e2eb018bdf98a8f53ec755740ffc728637a1d1ab407b2070aaf070a2d081810cdfd2b188096a82222209f223f804e2d94ac51c4321b0687397012e6d95eb9783b03bc790da631004c7c0a2d081710adb31a18f395a8222a20d2a38865de82383ccce0140513b65cec1bf2ae6cd7dfeb22eb6faadb4e26b26f0a2d081510b2990b18f395a82222208a02bbd5a695dfc772627ac8744aa9cf30ae26575bdce8c96a9a0d0999175b430a2d081410e6ff0418f395a8222a20d39619c779be909e67f23499fb74eb2c19afd7f21523401d4ccf7e917db5cd600a2d081210e3fe0118f395a8222a20a10cc73843f889d9e03a463eb135e928bb980e19734344cba0fbf4e8a4c5258b0a2c081010dd6518f395a8222a2007fd15843a2fd3f58d021b0e072a6c70742d7a3d993a922445e3491e1c14ee8e0a2c080f10cc2a18eda6a7222a20088942d7b30abd021d8e9505cc41313fad87c8c10a799f3b51018b7b2cfe4ad90a2c080d10b70d18eda6a7222a2091a37bc44d0c61e3752ddc59eb390355ab65e8a9fb453be4f0acec537f1ca14f0a2c080c10890818eda6a72222201cfc317855a06667c45812fe36efe33af05671dfe0d9b56b02662011af2e79e30a2c080b10ac0318c4b0ee212220aeb454a4b3243b6269a2fd8841dca9a951c53b30f1e27da91063dae7224402c70a2c080910e40118c4b0ee212a20441340a4de6498f861b97b3f3ad9603af055e5af51a0d96fff2ae28e3c5c6c9a0a2c0808108d0118c4b0ee212220ae32ea4b9ab7b53571da320e2815fd8b2c278124961cca4a1849a799842424450a2b0807104d18c4b0ee212220e2804c9b7f045ec0b4ab20920a937b82fda8b7a9ddd12b21637335b915cfda550a2b0806102418a5f4c7192a20ec85f22addedfc82c771af5b4c77544b7c1d7c5bbac33f2712dfba1045ebdbd00a2b0805101118a5f4c7192a2071ade34dcc447a0ba8adc603080633d15c06f3525830c86ebce35eca0a4921fc0a2b0804100c18a5f4c7192a205190bce93993e65b266a3417ed511df8897a812cb4b62569e5afcfbec10b69cd0a2b0803100618a5f4c7192220b76c6884f1d412ac10bfb3987fb7d26f0330b2a85539509ebc5c6bdec2f95d520a2b0802100418a5f4c71922206a285b4a4f9d1c687bbafa1f3649b6a6e32b1a85dd0402421210683e846cf0020a2b0801100218a5f4c7192220033b3f7c6dcb258b6e55545e7a4f51539447cd595eb8a2e373ba0015502da1051a450a1c6163636f756e743a8a4e2eb018bdf98a8f53ec755740ffc728637a1d12201a272295e94cf1d8090bdb019dde48e9dab026ad2c3e43aaa7e61cc954a9245d18a5f4c7190ab6040a0a6d756c746973746f726512036163631aa204a0040a9d040a300a0364657812290a27088496a822122038fc49f49648fec62acc434151a51eaa378c1b20a730a749548e36f1529422500a300a03676f7612290a27088496a8221220a78ce489bdf08b9ee869c184876e1623dc38b3e64a5cf1a0005f97976c64deac0a380a0b61746f6d69635f7377617012290a27088496a8221220544c2fa38f61e10a39ec00b3e724d5834761268bb455cdbf5843bcf1531f8fbc0a300a0376616c12290a27088496a82212201f71082c9f6f45fb456b2c00b41e50d2f662f2dfec3cb6965f19d214bf02f3980a0f0a046d61696e12070a05088496a8220a320a057374616b6512290a27088496a82212200dd467343c718f240e50b4feac42970fc8c1c69a018be955f9c27913ac1f8b3c0a300a0361636312290a27088496a8221220270c19ccc9c40c5176b3dfbd8af734c97a307e0dbd8df9e286dcd5d709f973ed0a330a06746f6b656e7312290a27088496a8221220c4f96eedf50c83964de9df013afec2e545012d92528b643a5166c828774187b60a320a05706169727312290a27088496a8221220351c55cfda84596ecd22ebc77013662aba97f81f19d9ef3d150213bb07c823060a360a0974696d655f6c6f636b12290a27088496a8221220e7adf5bd30ce022decf0e9341bf05c464ed70cdbc97423bd2bab8f3571e5179b0a330a06706172616d7312290a27088496a822122042a9dfc356ca435db131eb41fb1975c8482f2434537918665e530b0b4633b5f9").unwrap();
+    fn test_proof_execute() {
+        let input = hex::decode("00000000000000000000000000000000000000000000000000000000000007ae6962630000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000e0000010038020000000000019ce2000000000000000000000000000000000000000000000000000000000000009300000000000000000000000000000000000000000000000000000e35fa931a0000f870a0424e420000000000000000000000000000000000000000000000000000000000940000000000000000000000000000000000000000889bef94293405280094ef81397266e8021d967c3099aa8b781f8c3f99f2948ba31c21685c7ffa3cbb69cd837672dd5254cadb86017713ec8491cb58b672e759d5c7d9b6ac2d39568153aaa730c488acaa3d6097d774df0976900a91070a066961766c3a76120e0000010038020000000000019ce21af606f4060af1060a2d08121083bc0618cbcf954222206473c3fc09d3e700e4b8121ebedb8defedb38a57a11fa54300c7f537318c9b190a2d0811108f960418cbcf954222208b061ab760b6341a915696265ab0841f0657f0d0ad75c5bc08b5a92df9f6e84a0a2d081010c7d20118cbcf9542222091759ca6146640e0a33de7be5b53db2c69abf3eaf4b483a0b86cc8893d8853ce0a2c080f10c77318cbcf95422220d0d5c5c95b4e1d15b8cf01dfa68b3af6a846d549d7fb61eaed3ae6a256bd0e350a2c080e10c74318cbcf954222207183ccf5b70efc3e4c849c86ded15118819a46a9fb7eea5034fd477d56bf3c490a2c080d10c72b18cbcf954222205b5a92812ee771649fa4a53464ae7070adfd3aaea01140384bd9bfc11fe1ec400a2c080c10c71318cbcf95422220dc4d735d7096527eda97f96047ac42bcd53eee22c67a8e2f4ed3f581cb11851a0a2c080b10c70718cbcf95422a20b5d530b424046e1269950724735a0da5c402d8640ad4a0e65499b2d05bf7b87b0a2c080a10e40518cbcf95422220a51a3db12a79f3c809f63df49061ad40b7276a10a1a6809d9e0281cc35534b3f0a2c080910e40318cbcf9542222015eb48e2a1dd37ad88276cb04935d4d3b39eb993b24ee20a18a6c3d3feabf7200a2c080810e40118cbcf954222204c1b127f2e7b9b063ef3111479426a3b7a8fdea03b566a6f0a0decc1ef4584b20a2b0807106418cbcf95422220d17128bc7133f1f1159d5c7c82748773260d9a9958aa03f39a380e6a506435000a2b0806102418cbcf95422220959951e4ac892925994b564b54f7dcdf96be49e6167497b7c34aac7d8b3e11ac0a2b0805101418cbcf95422220e047c1f1c58944a27af737dcee1313dc501c4e2006663e835bcca9662ffd84220a2b0804100c18cbcf95422220ddf4258a669d79d3c43411bdef4161d7fc299f0558e204f4eda40a7e112007300a2b0803100818cbcf95422220e2ecce5e132eebd9d01992c71a2d5eb5d579b10ab162fc8a35f41015ab08ac750a2b0802100418cbcf9542222078a11f6a79afcc1e2e4abf6c62d5c1683cfc3bd9789d5fd4828f88a9e36a3b230a2b0801100218cbcf954222206d61aa355d7607683ef2e3fafa19d85eca227e417d68a8fdc6166dde4930fece1a370a0e0000010038020000000000019ce2122086295bb11ac7cba0a6fc3b9cfd165ea6feb95c37b6a2f737436a5d138f29e23f18cbcf95420af6050a0a6d756c746973746f726512036962631ae205e0050add050a330a06746f6b656e7312290a2708d6cf95421220789d2c8eac364abf32a2200e1d924a0e255703a162ee0c3ac2c37b347ae3daff0a0e0a0376616c12070a0508d6cf95420a320a057374616b6512290a2708d6cf954212207ebe9250eeae08171b95b93a0e685e8f25b9e2cce0464d2101f3e5607b76869e0a320a05706169727312290a2708d6cf95421220fe5e73b53ccd86f727122d6ae81aeab35f1e5338c4bdeb90e30fae57b202e9360a300a0369626312290a2708d6cf95421220af249eb96336e7498ffc266165a9716feb3363fc9560980804e491e181d8b5760a330a0662726964676512290a2708d6cf95421220bd239e499785b20d4a4c61862145d1f8ddf96c8e7e046d6679e4dfd4d38f98300a0f0a046d61696e12070a0508d6cf95420a300a0361636312290a2708d6cf954212208450d84a94122dcbf3a60b59b5f03cc13d0fee2cfe4740928457b885e9637f070a380a0b61746f6d69635f7377617012290a2708d6cf954212208d76e0bb011e064ad1964c1b322a0df526d24158e1f3189efbf5197818e711cb0a2f0a02736312290a2708d6cf95421220aebdaccfd22b92af6a0d9357232b91b342f068386e1ddc610f433d9feeef18480a350a08736c617368696e6712290a2708d6cf95421220fb0f9a8cf22cca3c756f8fefed19516ea27b6793d23a68ee85873b92ffddfac20a360a0974696d655f6c6f636b12290a2708d6cf95421220b40e4164b954e829ee8918cb3310ba691ea8613dc810bf65e77379dca70bf6ae0a330a06706172616d7312290a2708d6cf9542122024a0aa2cea5a4fd1b5f375fcf1e1318e5f49a5ff89209f18c12505f2d7b6ecb40a300a03676f7612290a2708d6cf95421220939b333eb64a437d398da930435d6ca6b0b1c9db810698f1734c141013c08e350a300a0364657812290a2708d6cf954212204fb5c65140ef175a741c8603efe98fc04871717d978e7dfb80a4a48e66d21e960a110a066f7261636c6512070a0508d6cf9542").unwrap();
 
         let mut output = [0u8; 32];
 
-        execute(&input[..], &mut BytesRef::Fixed(&mut output[..])).unwrap();
-        println!("{:?}", hex::encode(&output[..]));
-    }
-    #[test]
-    fn test_execut2() {
-        // let input = hex::decode("b2070aaf070a2d081810cdfd2b188096a82222209f223f804e2d94ac51c4321b0687397012e6d95eb9783b03bc790da631004c7c0a2d081710adb31a18f395a8222a20d2a38865de82383ccce0140513b65cec1bf2ae6cd7dfeb22eb6faadb4e26b26f0a2d081510b2990b18f395a82222208a02bbd5a695dfc772627ac8744aa9cf30ae26575bdce8c96a9a0d0999175b430a2d081410e6ff0418f395a8222a20d39619c779be909e67f23499fb74eb2c19afd7f21523401d4ccf7e917db5cd600a2d081210e3fe0118f395a8222a20a10cc73843f889d9e03a463eb135e928bb980e19734344cba0fbf4e8a4c5258b0a2c081010dd6518f395a8222a2007fd15843a2fd3f58d021b0e072a6c70742d7a3d993a922445e3491e1c14ee8e0a2c080f10cc2a18eda6a7222a20088942d7b30abd021d8e9505cc41313fad87c8c10a799f3b51018b7b2cfe4ad90a2c080d10b70d18eda6a7222a2091a37bc44d0c61e3752ddc59eb390355ab65e8a9fb453be4f0acec537f1ca14f0a2c080c10890818eda6a72222201cfc317855a06667c45812fe36efe33af05671dfe0d9b56b02662011af2e79e30a2c080b10ac0318c4b0ee212220aeb454a4b3243b6269a2fd8841dca9a951c53b30f1e27da91063dae7224402c70a2c080910e40118c4b0ee212a20441340a4de6498f861b97b3f3ad9603af055e5af51a0d96fff2ae28e3c5c6c9a0a2c0808108d0118c4b0ee212220ae32ea4b9ab7b53571da320e2815fd8b2c278124961cca4a1849a799842424450a2b0807104d18c4b0ee212220e2804c9b7f045ec0b4ab20920a937b82fda8b7a9ddd12b21637335b915cfda550a2b0806102418a5f4c7192a20ec85f22addedfc82c771af5b4c77544b7c1d7c5bbac33f2712dfba1045ebdbd00a2b0805101118a5f4c7192a2071ade34dcc447a0ba8adc603080633d15c06f3525830c86ebce35eca0a4921fc0a2b0804100c18a5f4c7192a205190bce93993e65b266a3417ed511df8897a812cb4b62569e5afcfbec10b69cd0a2b0803100618a5f4c7192220b76c6884f1d412ac10bfb3987fb7d26f0330b2a85539509ebc5c6bdec2f95d520a2b0802100418a5f4c71922206a285b4a4f9d1c687bbafa1f3649b6a6e32b1a85dd0402421210683e846cf0020a2b0801100218a5f4c7192220033b3f7c6dcb258b6e55545e7a4f51539447cd595eb8a2e373ba0015502da1051a450a1c6163636f756e743a8a4e2eb018bdf98a8f53ec755740ffc728637a1d12201a272295e94cf1d8090bdb019dde48e9dab026ad2c3e43aaa7e61cc954a9245d18a5f4c719").unwrap();
-        let input = hex::decode("1a0a180a0c0802100118012201012a01011a080a01011201011801").unwrap();
-        let k = IavlValueProofOp::decode_length_delimited(input.as_slice());
-        println!("K: {:?}", k);
+        let valid = execute(&input[..], &mut BytesRef::Fixed(&mut output[..]));
+        assert!(valid.is_ok())
     }
 
     #[test]
-    fn test_execut1() {
-        let msg = RangeProof {
-            left_path: vec![ProofInnerNode {
-                height: 1,
-                size: 1,
-                version: 1,
-                left: vec![1],
-                right: vec![1],
-            }],
-            inner_nodes: vec![],
-            leaves: vec![ProofLeafNode {
-                key: vec![1],
-                value_hash: vec![1],
-                version: 1,
-            }],
+    fn test_node_hash() {
+        let leaf_node = ProofLeafNode {
+            key: vec![1, 2, 3],
+            value_hash: vec![1, 2, 3],
+            version: 100,
         };
-        let mut buf = Vec::new();
-        msg.encode_length_delimited(&mut buf)
-            .expect("encode_auth_signature failed");
-        println!("{:?}", hex::encode(&buf.as_slice()));
-        let k = RangeProof::decode_length_delimited(buf.as_slice());
-        println!("K: {:?}", k);
+        let hash = leaf_node.NodeHash();
+        assert_eq!(
+            hex::encode(hash),
+            "fe8cc782985ae22ab241b2ca8e2c54be553a37238cdad8ae6a17ca76dd95b79a"
+        );
+
+        let inner_node = ProofInnerNode {
+            height: 30,
+            size: 3,
+            version: 100,
+            left: vec![1, 2, 3],
+            right: vec![1, 2, 3],
+        };
+        let child_hash = [11_u8; 32];
+        let hash = inner_node.ChildNodeHash(child_hash);
+        assert_eq!(
+            hex::encode(&hash),
+            "5b84a6b514836dd0dc02e7eaa1fc7498d6f5933695f357ce7701493dcf6edcfe"
+        );
     }
 
     #[test]

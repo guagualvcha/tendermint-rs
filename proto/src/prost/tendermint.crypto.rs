@@ -1,3 +1,169 @@
+
+#[derive(Clone, PartialEq, ::prost_amino_derive::Message)]
+#[derive(::serde::Deserialize, ::serde::Serialize)]
+pub struct LightBlock {
+    #[prost_amino(message, optional, tag="1")]
+    pub signed_header: ::std::option::Option<SignedHeader>,
+    #[prost_amino(message, optional, tag="2")]
+    pub validator_set: ::std::option::Option<ValidatorSet>,
+    #[prost_amino(message, optional, tag="3")]
+    pub next_validator_set: ::std::option::Option<ValidatorSet>,
+}
+
+#[derive(Clone, PartialEq, ::prost_amino_derive::Message)]
+#[derive(::serde::Deserialize, ::serde::Serialize)]
+pub struct ValidatorSet {
+    #[prost_amino(message, repeated, tag="1")]
+    pub validators: ::std::vec::Vec<Validator>,
+    #[prost_amino(message, optional, tag="2")]
+    pub proposer: ::std::option::Option<Validator>,
+    #[prost_amino(int64, tag="3")]
+    pub total_voting_power: i64,
+}
+
+#[derive(Clone, PartialEq, ::prost_amino_derive::Message)]
+#[derive(::serde::Deserialize, ::serde::Serialize)]
+pub struct Validator {
+    #[prost_amino(bytes, tag="1")]
+    #[serde(with = "crate::serializers::bytes::hexstring")]
+    pub address: std::vec::Vec<u8>,
+    #[prost_amino(bytes, tag = "2", amino_name = "tendermint/PubKeyEd25519")]
+    pub pub_key: Vec<u8>,
+    #[prost_amino(int64, tag="3")]
+    #[serde(alias = "power", with = "crate::serializers::from_str")]
+    pub voting_power: i64,
+    #[prost_amino(int64, tag="4")]
+    #[serde(with = "crate::serializers::from_str", default)]
+    pub proposer_priority: i64,
+}
+
+#[derive(Clone, PartialEq, ::prost_amino_derive::Message)]
+#[derive(::serde::Deserialize, ::serde::Serialize)]
+pub struct SignedHeader {
+    #[prost_amino(message, optional, tag="1")]
+    pub header: ::std::option::Option<Header>,
+    #[prost_amino(message, optional, tag="2")]
+    pub commit: ::std::option::Option<Commit>,
+}
+
+/// Commit contains the evidence that a block was committed by a set of validators.
+#[derive(Clone, PartialEq, ::prost_amino_derive::Message)]
+#[derive(::serde::Deserialize, ::serde::Serialize)]
+pub struct Commit {
+    #[prost_amino(int64, tag="1")]
+    #[serde(with = "crate::serializers::from_str")]
+    pub height: i64,
+    #[prost_amino(int32, tag="2")]
+    pub round: i32,
+    #[prost_amino(message, optional, tag="3")]
+    pub block_id: ::std::option::Option<BlockId>,
+    #[prost_amino(message, repeated, tag="4")]
+    #[serde(with = "crate::serializers::nullable")]
+    pub signatures: ::std::vec::Vec<CommitSig>,
+}
+
+/// CommitSig is a part of the Vote included in a Commit.
+#[derive(Clone, PartialEq, ::prost_amino_derive::Message)]
+#[derive(::serde::Deserialize, ::serde::Serialize)]
+pub struct CommitSig {
+    #[prost_amino(enumeration="BlockIdFlag", tag="1")]
+    pub block_id_flag: i32,
+    #[prost_amino(bytes, tag="2")]
+    #[serde(with = "crate::serializers::bytes::hexstring")]
+    pub validator_address: std::vec::Vec<u8>,
+    #[prost_amino(message, optional, tag="3")]
+    #[serde(with = "crate::serializers::optional")]
+    pub timestamp: ::std::option::Option<super::super::google::protobuf::Timestamp>,
+    #[prost_amino(bytes, tag="4")]
+    #[serde(with = "crate::serializers::bytes::base64string")]
+    pub signature: std::vec::Vec<u8>,
+}
+
+/// Header defines the structure of a Tendermint block header.
+#[derive(Clone, PartialEq, ::prost_amino_derive::Message)]
+#[derive(::serde::Deserialize, ::serde::Serialize)]
+pub struct Header {
+    /// basic block info
+    #[prost_amino(message, optional, tag="1")]
+    pub version: ::std::option::Option<super::version::Consensus>,
+    #[prost_amino(string, tag="2")]
+    pub chain_id: std::string::String,
+    #[prost_amino(int64, tag="3")]
+    #[serde(with = "crate::serializers::from_str")]
+    pub height: i64,
+    #[prost_amino(message, optional, tag="4")]
+    #[serde(with = "crate::serializers::optional")]
+    pub time: ::std::option::Option<super::super::google::protobuf::Timestamp>,
+    /// prev block info
+    #[prost_amino(message, optional, tag="5")]
+    pub last_block_id: ::std::option::Option<BlockId>,
+    /// hashes of block data
+    ///
+    /// commit from validators from the last block
+    #[prost_amino(bytes, tag="6")]
+    #[serde(with = "crate::serializers::bytes::hexstring")]
+    pub last_commit_hash: std::vec::Vec<u8>,
+    /// transactions
+    #[prost_amino(bytes, tag="7")]
+    #[serde(with = "crate::serializers::bytes::hexstring")]
+    pub data_hash: std::vec::Vec<u8>,
+    /// hashes from the app output from the prev block
+    ///
+    /// validators for the current block
+    #[prost_amino(bytes, tag="8")]
+    #[serde(with = "crate::serializers::bytes::hexstring")]
+    pub validators_hash: std::vec::Vec<u8>,
+    /// validators for the next block
+    #[prost_amino(bytes, tag="9")]
+    #[serde(with = "crate::serializers::bytes::hexstring")]
+    pub next_validators_hash: std::vec::Vec<u8>,
+    /// consensus params for current block
+    #[prost_amino(bytes, tag="10")]
+    #[serde(with = "crate::serializers::bytes::hexstring")]
+    pub consensus_hash: std::vec::Vec<u8>,
+    /// state after txs from the previous block
+    #[prost_amino(bytes, tag="11")]
+    #[serde(with = "crate::serializers::bytes::hexstring")]
+    pub app_hash: std::vec::Vec<u8>,
+    /// root hash of all results from the txs from the previous block
+    #[prost_amino(bytes, tag="12")]
+    #[serde(with = "crate::serializers::bytes::hexstring")]
+    pub last_results_hash: std::vec::Vec<u8>,
+    /// consensus info
+    ///
+    /// evidence included in the block
+    #[prost_amino(bytes, tag="13")]
+    #[serde(with = "crate::serializers::bytes::hexstring")]
+    pub evidence_hash: std::vec::Vec<u8>,
+    /// original proposer of the block
+    #[prost_amino(bytes, tag="14")]
+    #[serde(with = "crate::serializers::bytes::hexstring")]
+    pub proposer_address: std::vec::Vec<u8>,
+}
+
+/// BlockID
+#[derive(Clone, PartialEq, ::prost_amino_derive::Message)]
+#[derive(::serde::Deserialize, ::serde::Serialize)]
+pub struct BlockId {
+    #[prost_amino(bytes, tag="1")]
+    #[serde(with = "crate::serializers::bytes::hexstring")]
+    pub hash: std::vec::Vec<u8>,
+    #[prost_amino(message, optional, tag="2")]
+    #[serde(alias = "parts")]
+    pub part_set_header: ::std::option::Option<PartSetHeader>,
+}
+
+#[derive(Clone, PartialEq, ::prost_amino_derive::Message)]
+#[derive(::serde::Deserialize, ::serde::Serialize)]
+pub struct PartSetHeader {
+    #[prost_amino(uint32, tag="1")]
+    #[serde(with = "crate::serializers::part_set_header_total")]
+    pub total: u32,
+    #[prost_amino(bytes, tag="2")]
+    #[serde(with = "crate::serializers::bytes::hexstring")]
+    pub hash: std::vec::Vec<u8>,
+}
+
 #[derive(Clone, PartialEq, ::prost::Message, ::serde::Deserialize, ::serde::Serialize)]
 pub struct Proof {
     #[prost(int64, tag = "1")]
