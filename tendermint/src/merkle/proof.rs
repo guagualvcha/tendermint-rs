@@ -187,7 +187,11 @@ struct MultiStoreProofVerifier {
 impl MultiStoreProofVerifier {
     fn store_info_hash(s: &StoreInfo) -> Hash {
         let mut wire = Vec::new();
-        s.core.as_ref().unwrap().encode_length_delimited(&mut wire).unwrap();
+        s.core
+            .as_ref()
+            .unwrap()
+            .encode_length_delimited(&mut wire)
+            .unwrap();
         let tmp_hash = Sha256::digest(wire.as_slice());
         let mut hash = [0u8; SHA256_HASH_SIZE];
         hash.copy_from_slice(&tmp_hash);
@@ -390,7 +394,6 @@ impl KeyValueMerkleProof {
 }
 
 fn decode_key_value_merkle_proof(input: &[u8]) -> Result<KeyValueMerkleProof, &'static str> {
-    let res: Result<KeyValueMerkleProof, &'static str>;
     let input_length = input.len();
     let mut pos = 0;
     if input_length
@@ -399,8 +402,7 @@ fn decode_key_value_merkle_proof(input: &[u8]) -> Result<KeyValueMerkleProof, &'
             + VALUE_LENGTH_BYTES_LENGTH
             + APP_HASH_LENGTH
     {
-        res = Err("no enough input length");
-        return res;
+        return Err("no enough input length");
     }
     let mut cursor = Cursor::new(input);
     let store_name = input[pos..pos + STORE_NAME_LENGTH_BYTES_LENGTH].trim_with(|c| c == '\x00');
@@ -414,8 +416,7 @@ fn decode_key_value_merkle_proof(input: &[u8]) -> Result<KeyValueMerkleProof, &'
             + (key_length as usize)
             + VALUE_LENGTH_BYTES_LENGTH
     {
-        res = Err("invalid input, keyLength is too long");
-        return res;
+        return Err("invalid input, keyLength is too long");
     }
     let key = &input[pos..pos + key_length as usize];
     pos += key_length as usize;
@@ -430,8 +431,7 @@ fn decode_key_value_merkle_proof(input: &[u8]) -> Result<KeyValueMerkleProof, &'
             + (value_length as usize)
             + APP_HASH_LENGTH
     {
-        res = Err("invalid input, valueLength is too long");
-        return res;
+        return Err("invalid input, valueLength is too long");
     }
     let value = &input[pos..pos + (value_length as usize)];
     pos += value_length as usize;
@@ -440,41 +440,35 @@ fn decode_key_value_merkle_proof(input: &[u8]) -> Result<KeyValueMerkleProof, &'
     let proof_bytes = &input[pos..];
     let proof = Proof::decode(proof_bytes);
     if proof.is_err() {
-        res = Err("Decode proof failed");
-        return res;
+        return Err("Decode proof failed");
     }
-    res = Ok(KeyValueMerkleProof {
+    Ok(KeyValueMerkleProof {
         key: key.to_vec(),
         value: value.to_vec(),
         store_name: store_name.to_vec(),
         app_hash: app_hash.to_vec(),
         proof: proof.unwrap(),
-    });
-    return res;
+    })
 }
 
 pub fn execute(input: &[u8], output: &mut BytesRef) -> Result<(), &'static str> {
-    let mut res: Result<(), &str> = Ok(());
     if input.len() <= PRECOMPILE_CONTRACT_INPUT_METADATA_LENGTH {
-        res = Err("invalid input: input should include 32 bytes payload length and payload");
-        return res;
+        return Err("invalid input: input should include 32 bytes payload length and payload");
     }
     let mut cursor = Cursor::new(input);
     cursor.set_position((PRECOMPILE_CONTRACT_INPUT_METADATA_LENGTH - UINT64_TYPE_LENGTH) as u64);
     let payload_length = cursor.read_u64::<BigEndian>().unwrap();
     if input.len() != ((payload_length as usize) + PRECOMPILE_CONTRACT_INPUT_METADATA_LENGTH) {
-        res = Err("invalid input: input size do not match");
-        return res;
+        return Err("invalid input: input size do not match");
     }
     let kvmp = decode_key_value_merkle_proof(&input[PRECOMPILE_CONTRACT_INPUT_METADATA_LENGTH..])?;
     let valid = kvmp.validate();
     if !valid {
-        res = Err("invalid merkle proof");
-        return res;
+        return Err("invalid merkle proof");
     }
     output.write(0, &[0_u8; MERKLE_PROOF_VALIDATE_RESULT_LENGTH - 1]);
     output.write(MERKLE_PROOF_VALIDATE_RESULT_LENGTH - 1, &[1_u8; 1]);
-    res
+    Ok(())
 }
 
 #[cfg(test)]
@@ -484,11 +478,6 @@ mod test {
     use crate::test::test_serialization_roundtrip;
     use hex;
     use parity_bytes::BytesRef;
-    // use prost::Message as _;
-    use crate::merkle::proof::NodeHash;
-    use tendermint_proto::crypto::{
-        ProofInnerNode, ProofLeafNode,
-    };
 
     #[test]
     fn test_proof_execute() {
@@ -498,34 +487,6 @@ mod test {
 
         let valid = execute(&input[..], &mut BytesRef::Fixed(&mut output[..]));
         assert!(valid.is_ok())
-    }
-
-    #[test]
-    fn test_node_hash() {
-        let leaf_node = ProofLeafNode {
-            key: vec![1, 2, 3],
-            value_hash: vec![1, 2, 3],
-            version: 100,
-        };
-        let hash = leaf_node.node_hash();
-        assert_eq!(
-            hex::encode(hash),
-            "fe8cc782985ae22ab241b2ca8e2c54be553a37238cdad8ae6a17ca76dd95b79a"
-        );
-
-        let inner_node = ProofInnerNode {
-            height: 30,
-            size: 3,
-            version: 100,
-            left: vec![1, 2, 3],
-            right: vec![1, 2, 3],
-        };
-        let child_hash = [11_u8; 32];
-        let hash = inner_node.child_node_hash(child_hash);
-        assert_eq!(
-            hex::encode(&hash),
-            "5b84a6b514836dd0dc02e7eaa1fc7498d6f5933695f357ce7701493dcf6edcfe"
-        );
     }
 
     #[test]

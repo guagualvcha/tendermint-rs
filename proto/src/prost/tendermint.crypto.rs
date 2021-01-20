@@ -194,49 +194,55 @@ pub struct Header {
     #[prost_amino(message, optional, tag="4")]
     #[serde(with = "crate::serializers::optional")]
     pub time: ::std::option::Option<Timestamp>,
+    #[prost_amino(int64, tag="5")]
+    #[serde(with = "crate::serializers::from_str")]
+    pub num_txs: i64,
+    #[prost_amino(int64, tag="6")]
+    #[serde(with = "crate::serializers::from_str")]
+    pub total_txs: i64,
     /// prev block info
-    #[prost_amino(message, optional, tag="5")]
+    #[prost_amino(message, optional, tag="7")]
     pub last_block_id: ::std::option::Option<BlockId>,
     /// hashes of block data
     ///
     /// commit from validators from the last block
-    #[prost_amino(bytes, tag="6")]
+    #[prost_amino(bytes, tag="8")]
     #[serde(with = "crate::serializers::bytes::hexstring")]
     pub last_commit_hash: std::vec::Vec<u8>,
     /// transactions
-    #[prost_amino(bytes, tag="7")]
+    #[prost_amino(bytes, tag="9")]
     #[serde(with = "crate::serializers::bytes::hexstring")]
     pub data_hash: std::vec::Vec<u8>,
     /// hashes from the app output from the prev block
     ///
     /// validators for the current block
-    #[prost_amino(bytes, tag="8")]
+    #[prost_amino(bytes, tag="10")]
     #[serde(with = "crate::serializers::bytes::hexstring")]
     pub validators_hash: std::vec::Vec<u8>,
     /// validators for the next block
-    #[prost_amino(bytes, tag="9")]
+    #[prost_amino(bytes, tag="11")]
     #[serde(with = "crate::serializers::bytes::hexstring")]
     pub next_validators_hash: std::vec::Vec<u8>,
     /// consensus params for current block
-    #[prost_amino(bytes, tag="10")]
+    #[prost_amino(bytes, tag="12")]
     #[serde(with = "crate::serializers::bytes::hexstring")]
     pub consensus_hash: std::vec::Vec<u8>,
     /// state after txs from the previous block
-    #[prost_amino(bytes, tag="11")]
+    #[prost_amino(bytes, tag="13")]
     #[serde(with = "crate::serializers::bytes::hexstring")]
     pub app_hash: std::vec::Vec<u8>,
     /// root hash of all results from the txs from the previous block
-    #[prost_amino(bytes, tag="12")]
+    #[prost_amino(bytes, tag="14")]
     #[serde(with = "crate::serializers::bytes::hexstring")]
     pub last_results_hash: std::vec::Vec<u8>,
     /// consensus info
     ///
     /// evidence included in the block
-    #[prost_amino(bytes, tag="13")]
+    #[prost_amino(bytes, tag="15")]
     #[serde(with = "crate::serializers::bytes::hexstring")]
     pub evidence_hash: std::vec::Vec<u8>,
     /// original proposer of the block
-    #[prost_amino(bytes, tag="14")]
+    #[prost_amino(bytes, tag="16")]
     #[serde(with = "crate::serializers::bytes::hexstring")]
     pub proposer_address: std::vec::Vec<u8>,
 }
@@ -410,4 +416,41 @@ pub mod public_key {
         )]
         Secp256k1(std::vec::Vec<u8>),
     }
+}
+
+#[derive(Clone, PartialEq, ::prost_amino_derive::Message)]
+#[derive(::serde::Deserialize, ::serde::Serialize)]
+pub struct CanonicalBlockId {
+    #[prost_amino(bytes, tag="1")]
+    pub hash: std::vec::Vec<u8>,
+    #[prost_amino(message, optional, tag="2")]
+    #[serde(alias = "parts")]
+    pub part_set_header: ::std::option::Option<CanonicalPartSetHeader>,
+}
+#[derive(Clone, PartialEq, ::prost_amino_derive::Message)]
+#[derive(::serde::Deserialize, ::serde::Serialize)]
+pub struct CanonicalPartSetHeader {
+    #[prost_amino(bytes, tag="1")]
+    pub hash: std::vec::Vec<u8>,
+    #[prost_amino(uint32, tag="2")]
+    pub total: u32,
+}
+#[derive(Clone, PartialEq, ::prost_amino_derive::Message)]
+#[derive(::serde::Deserialize, ::serde::Serialize)]
+pub struct CanonicalVote {
+    /// type alias for byte
+    #[prost_amino(int32, tag="1")]
+    pub signed_msg_type: i32,
+    /// canonicalization requires fixed size encoding here
+    #[prost_amino(sfixed64, tag="2")]
+    pub height: i64,
+    /// canonicalization requires fixed size encoding here
+    #[prost_amino(sfixed64, tag="3")]
+    pub round: i64,
+    #[prost_amino(message, optional, tag="4")]
+    pub block_id: ::std::option::Option<CanonicalBlockId>,
+    #[prost_amino(message, optional, tag="5")]
+    pub timestamp: ::std::option::Option<Timestamp>,
+    #[prost_amino(string, tag="6")]
+    pub chain_id: std::string::String,
 }
