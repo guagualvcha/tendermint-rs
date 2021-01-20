@@ -645,6 +645,8 @@ impl TmHeaderValidate {
 mod test {
     use crate::merkle::lightclient::TmHeaderValidate;
     use parity_bytes::BytesRef;
+    use tendermint_proto::crypto::{LightBlock, SignedHeader, ValidatorSet};
+    use prost_amino::Message as _;
 
     #[test]
     fn test_proof_execute() {
@@ -654,5 +656,30 @@ mod test {
 
         let valid = TmHeaderValidate::run(&input[..], &mut BytesRef::Fixed(&mut data));
         assert!(valid.is_ok())
+    }
+    #[test]
+    fn test_encode() {
+        let light_block = LightBlock{
+            signed_header: Some(SignedHeader{
+                header: None,
+                commit: None
+            }),
+            validator_set: Some(
+                ValidatorSet{
+                    validators: vec![],
+                    proposer: None,
+                    total_voting_power: 0
+                }
+            ),
+            next_validator_set: Some(ValidatorSet{
+                validators: vec![],
+                proposer: None,
+                total_voting_power: 0
+            })
+        };
+        let mut wire = Vec::new();
+        light_block.encode_length_delimited(&mut wire).unwrap();
+        let x = hex::encode(&wire);
+        println!("{}",x)
     }
 }
