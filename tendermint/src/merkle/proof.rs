@@ -12,7 +12,6 @@ use tendermint_proto::Protobuf;
 use crate::serializers;
 use crate::Error;
 use bstr::ByteSlice;
-use prost::Message;
 use sha2::{Digest, Sha256};
 use std::io::Cursor;
 
@@ -24,7 +23,6 @@ use byteorder::{BigEndian, ReadBytesExt};
 use parity_bytes::BytesRef;
 use prost_amino::encoding::encode_varint;
 use std::cmp::Ordering::Equal;
-use std::fs::read;
 
 const PRECOMPILE_CONTRACT_INPUT_METADATA_LENGTH: usize = 32;
 const MERKLE_PROOF_VALIDATE_RESULT_LENGTH: usize = 32;
@@ -105,16 +103,16 @@ impl From<Proof> for RawProofOps {
 }
 
 trait NodeHash {
-    fn NodeHash(&self) -> Hash;
-    fn ChildNodeHash(&self, child_hash: Hash) -> Hash;
+    fn node_hash(&self) -> Hash;
+    fn child_node_hash(&self, child_hash: Hash) -> Hash;
 }
 
 impl NodeHash for ProofInnerNode {
-    fn NodeHash(&self) -> Hash {
+    fn node_hash(&self) -> Hash {
         unimplemented!()
     }
 
-    fn ChildNodeHash(&self, child_hash: Hash) -> Hash {
+    fn child_node_hash(&self, child_hash: Hash) -> Hash {
         let mut inner_bytes: Vec<u8> = Vec::with_capacity(100);
         let mut h = (self.height as u64) << 1;
         if self.height < 0 {
@@ -141,18 +139,18 @@ impl NodeHash for ProofInnerNode {
     }
 }
 
-fn computePathLeafHash(path_to_leaf: &PathToLeaf, leaf: &ProofLeafNode) -> Hash {
-    let mut hash = leaf.NodeHash();
+fn compute_path_leaf_hash(path_to_leaf: &PathToLeaf, leaf: &ProofLeafNode) -> Hash {
+    let mut hash = leaf.node_hash();
     let n = path_to_leaf.inners.len();
     for i in 0..n {
         let pin = path_to_leaf.inners.get(n - i - 1).unwrap();
-        hash = pin.ChildNodeHash(hash);
+        hash = pin.child_node_hash(hash);
     }
     return hash;
 }
 
 impl NodeHash for ProofLeafNode {
-    fn NodeHash(&self) -> Hash {
+    fn node_hash(&self) -> Hash {
         let mut leaf_bytes: Vec<u8> = Vec::with_capacity(100);
         encode_varint(0_u64, &mut leaf_bytes);
         encode_varint(1_u64 << 1, &mut leaf_bytes);
@@ -169,7 +167,7 @@ impl NodeHash for ProofLeafNode {
         hash_bytes
     }
 
-    fn ChildNodeHash(&self, _: Hash) -> Hash {
+    fn child_node_hash(&self, _: Hash) -> Hash {
         unimplemented!()
     }
 }
@@ -189,7 +187,7 @@ struct MultiStoreProofVerifier {
 impl MultiStoreProofVerifier {
     fn store_info_hash(s: &StoreInfo) -> Hash {
         let mut wire = Vec::new();
-        s.core.as_ref().unwrap().encode_length_delimited(&mut wire);
+        s.core.as_ref().unwrap().encode_length_delimited(&mut wire).unwrap();
         let tmp_hash = Sha256::digest(wire.as_slice());
         let mut hash = [0u8; SHA256_HASH_SIZE];
         hash.copy_from_slice(&tmp_hash);
@@ -198,8 +196,8 @@ impl MultiStoreProofVerifier {
     pub fn compute_root_hash(&mut self) -> Result<Hash, &'static str> {
         let mut kvs = Vec::new();
         struct KVPair {
-            Key: Vec<u8>,
-            Value: Vec<u8>,
+            key: Vec<u8>,
+            value: Vec<u8>,
         }
         for store in self.proof.store_infos.iter() {
             let tmp_hash = Sha256::digest(
@@ -210,14 +208,14 @@ impl MultiStoreProofVerifier {
             let mut store_hash = [0u8; SHA256_HASH_SIZE];
             store_hash.copy_from_slice(&tmp_hash);
             kvs.push(KVPair {
-                Key: store.name.clone().into_bytes(),
-                Value: store_hash.to_vec(),
+                key: store.name.clone().into_bytes(),
+                value: store_hash.to_vec(),
             })
         }
         kvs.sort_by(|a, b| {
-            let x = a.Key.cmp(&b.Key);
+            let x = a.key.cmp(&b.key);
             if x == Equal {
-                a.Value.cmp(&b.Value)
+                a.value.cmp(&b.value)
             } else {
                 x
             }
@@ -227,10 +225,10 @@ impl MultiStoreProofVerifier {
             .iter()
             .map(|kv| {
                 let mut kv_bytes: Vec<u8> = Vec::new();
-                encode_varint(kv.Key.len() as u64, &mut kv_bytes);
-                kv_bytes.extend_from_slice(&kv.Key);
-                encode_varint(kv.Value.len() as u64, &mut kv_bytes);
-                kv_bytes.extend_from_slice(&kv.Value);
+                encode_varint(kv.key.len() as u64, &mut kv_bytes);
+                kv_bytes.extend_from_slice(&kv.key);
+                encode_varint(kv.value.len() as u64, &mut kv_bytes);
+                kv_bytes.extend_from_slice(&kv.value);
                 kv_bytes
             })
             .collect();
@@ -267,7 +265,7 @@ impl RangeProofVerifier {
         let nleaf = &leaves[0];
         let rleaves = &leaves[1..];
 
-        let hash = computePathLeafHash(&path, nleaf);
+        let hash = compute_path_leaf_hash(&path, nleaf);
         if rleaves.is_empty() {
             return (Ok(hash), true);
         }
@@ -278,7 +276,7 @@ impl RangeProofVerifier {
             if lpath.right.is_empty() {
                 continue;
             }
-            let mut inners: PathToLeaf = innersq[0].clone();
+            let inners: PathToLeaf = innersq[0].clone();
             let rinnersq = &innersq[1..].to_vec();
             let (derived_root, done) =
                 RangeProofVerifier::ite_compute_root_hash(rleaves, rinnersq, inners);
@@ -303,9 +301,9 @@ impl RangeProofVerifier {
         if self.proof.inner_nodes.len() + 1 != leaves.len() {
             return Err("InnerNodes vs Leaves length mismatch, leaves should be 1 more.");
         }
-        let mut ite_leaves = leaves.as_slice();
-        let mut innersq = &self.proof.inner_nodes;
-        let mut path = PathToLeaf {
+        let ite_leaves = leaves.as_slice();
+        let innersq = &self.proof.inner_nodes;
+        let path = PathToLeaf {
             inners: self.proof.left_path.clone(),
         };
         let (root_hash, done) =
@@ -315,8 +313,6 @@ impl RangeProofVerifier {
         }
         return root_hash;
     }
-
-    fn proof_leaf_node_hash() {}
 }
 
 impl ProofExecute for IavlValueProofOp {
@@ -491,7 +487,7 @@ mod test {
     // use prost::Message as _;
     use crate::merkle::proof::NodeHash;
     use tendermint_proto::crypto::{
-        IavlValueProofOp, PathToLeaf, ProofInnerNode, ProofLeafNode, RangeProof,
+        ProofInnerNode, ProofLeafNode,
     };
 
     #[test]
@@ -511,7 +507,7 @@ mod test {
             value_hash: vec![1, 2, 3],
             version: 100,
         };
-        let hash = leaf_node.NodeHash();
+        let hash = leaf_node.node_hash();
         assert_eq!(
             hex::encode(hash),
             "fe8cc782985ae22ab241b2ca8e2c54be553a37238cdad8ae6a17ca76dd95b79a"
@@ -525,7 +521,7 @@ mod test {
             right: vec![1, 2, 3],
         };
         let child_hash = [11_u8; 32];
-        let hash = inner_node.ChildNodeHash(child_hash);
+        let hash = inner_node.child_node_hash(child_hash);
         assert_eq!(
             hex::encode(&hash),
             "5b84a6b514836dd0dc02e7eaa1fc7498d6f5933695f357ce7701493dcf6edcfe"
