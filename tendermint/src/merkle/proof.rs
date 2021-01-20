@@ -370,7 +370,7 @@ impl KeyValueMerkleProof {
         if iavl_op.field_type != "iavl:v" {
             return false;
         }
-        let iavl_proof = IavlValueProofOp::decodedecode_length_delimited(&iavl_op.data[..]).unwrap();
+        let iavl_proof = IavlValueProofOp::decode_length_delimited(&iavl_op.data[..]).unwrap();
         let iavl_hash: Result<Hash, &'static str> =
             iavl_proof.run(self.value.clone(), self.key.clone());
         if iavl_hash.is_err() {
@@ -488,7 +488,6 @@ mod test {
     use crate::test::test_serialization_roundtrip;
     use hex;
     use parity_bytes::BytesRef;
-    use prost_amino::Message as _;
     // use prost::Message as _;
     use crate::merkle::proof::NodeHash;
     use tendermint_proto::crypto::{

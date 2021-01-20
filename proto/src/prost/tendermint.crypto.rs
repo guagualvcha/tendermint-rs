@@ -1,3 +1,6 @@
+use chrono::{DateTime, Datelike, LocalResult, TimeZone, Timelike, Utc};
+use serde::ser::Error;
+use serde::{de::Error as _, Deserialize, Deserializer, Serialize, Serializer};
 
 #[derive(Clone, PartialEq, ::prost_amino_derive::Message)]
 #[derive(::serde::Deserialize, ::serde::Serialize)]
@@ -50,34 +53,131 @@ pub struct SignedHeader {
 #[derive(Clone, PartialEq, ::prost_amino_derive::Message)]
 #[derive(::serde::Deserialize, ::serde::Serialize)]
 pub struct Commit {
-    #[prost_amino(int64, tag="1")]
-    #[serde(with = "crate::serializers::from_str")]
-    pub height: i64,
-    #[prost_amino(int32, tag="2")]
-    pub round: i32,
-    #[prost_amino(message, optional, tag="3")]
+    #[prost_amino(message, optional, tag="1")]
     pub block_id: ::std::option::Option<BlockId>,
-    #[prost_amino(message, repeated, tag="4")]
+    #[prost_amino(message, repeated, tag="2")]
     #[serde(with = "crate::serializers::nullable")]
     pub signatures: ::std::vec::Vec<CommitSig>,
 }
-
 /// CommitSig is a part of the Vote included in a Commit.
 #[derive(Clone, PartialEq, ::prost_amino_derive::Message)]
 #[derive(::serde::Deserialize, ::serde::Serialize)]
 pub struct CommitSig {
-    #[prost_amino(enumeration="BlockIdFlag", tag="1")]
-    pub block_id_flag: i32,
-    #[prost_amino(bytes, tag="2")]
+    #[prost_amino(int32, tag="1")]
+    pub vote_type: i32,
+    #[prost_amino(int64, tag="2")]
+    pub height: i64,
+    #[prost_amino(int32, tag="3")]
+    pub round: i32,
+    #[prost_amino(message, optional, tag="4")]
+    pub block_id: ::std::option::Option<BlockId>,
+    #[prost_amino(message, optional, tag="5")]
+    #[serde(with = "crate::serializers::optional")]
+    pub timestamp: ::std::option::Option<Timestamp>,
+    #[prost_amino(bytes, tag="6")]
     #[serde(with = "crate::serializers::bytes::hexstring")]
     pub validator_address: std::vec::Vec<u8>,
-    #[prost_amino(message, optional, tag="3")]
-    #[serde(with = "crate::serializers::optional")]
-    pub timestamp: ::std::option::Option<super::super::google::protobuf::Timestamp>,
-    #[prost_amino(bytes, tag="4")]
+    #[prost_amino(int32, tag="7")]
+    pub validator_index: i32,
+    #[prost_amino(bytes, tag="8")]
     #[serde(with = "crate::serializers::bytes::base64string")]
     pub signature: std::vec::Vec<u8>,
 }
+
+
+
+#[derive(Clone, PartialEq, ::prost_amino_derive::Message, ::serde::Deserialize, ::serde::Serialize)]
+#[serde(from = "Rfc3339", into = "Rfc3339")]
+pub struct Timestamp {
+    /// Represents seconds of UTC time since Unix epoch
+    /// 1970-01-01T00:00:00Z. Must be from 0001-01-01T00:00:00Z to
+    /// 9999-12-31T23:59:59Z inclusive.
+    #[prost_amino(int64, tag = "1")]
+    pub seconds: i64,
+    /// Non-negative fractions of a second at nanosecond resolution. Negative
+    /// second values with fractions must still have non-negative nanos values
+    /// that count forward in time. Must be from 0 to 999,999,999
+    /// inclusive.
+    #[prost_amino(int32, tag = "2")]
+    pub nanos: i32,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct Rfc3339(Timestamp);
+impl From<Timestamp> for Rfc3339 {
+    fn from(value: Timestamp) -> Self {
+        Rfc3339(value)
+    }
+}
+impl From<Rfc3339> for Timestamp {
+    fn from(value: Rfc3339) -> Self {
+        value.0
+    }
+}
+
+/// Deserialize string into Timestamp
+pub fn deserialize<'de, D>(deserializer: D) -> Result<Timestamp, D::Error>
+    where
+        D: Deserializer<'de>,
+{
+    let value_string = String::deserialize(deserializer)?;
+    let value_datetime = DateTime::parse_from_rfc3339(value_string.as_str())
+        .map_err(|e| D::Error::custom(format!("{}", e)))?;
+    Ok(Timestamp {
+        seconds: value_datetime.timestamp(),
+        nanos: value_datetime.timestamp_subsec_nanos() as i32,
+    })
+}
+
+/// Serialize from Timestamp into string
+pub fn serialize<S>(value: &Timestamp, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+{
+    if value.nanos < 0 {
+        return Err(S::Error::custom("invalid nanoseconds in time"));
+    }
+    match Utc.timestamp_opt(value.seconds, value.nanos as u32) {
+        LocalResult::None => Err(S::Error::custom("invalid time")),
+        LocalResult::Single(t) => Ok(to_rfc3339_custom(&t)),
+        LocalResult::Ambiguous(_, _) => Err(S::Error::custom("ambiguous time")),
+    }?
+        .serialize(serializer)
+}
+
+/// Serialization helper for converting a `DateTime<Utc>` object to a string.
+///
+/// Due to incompatibilities between the way that `chrono` serializes timestamps
+/// and the way that Go does for RFC3339, we unfortunately need to define our
+/// own timestamp serialization mechanism.
+pub fn to_rfc3339_custom(t: &DateTime<Utc>) -> String {
+    let nanos = format!(".{}", t.nanosecond());
+    format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}{}Z",
+        t.year(),
+        t.month(),
+        t.day(),
+        t.hour(),
+        t.minute(),
+        t.second(),
+        nanos.trim_end_matches('0').trim_end_matches('.'),
+    )
+}
+
+
+
+#[derive(Clone, PartialEq, ::prost_amino_derive::Message)]
+#[derive(::serde::Deserialize, ::serde::Serialize)]
+pub struct Consensus {
+    #[prost_amino(uint64, tag="1")]
+    #[serde(with = "crate::serializers::from_str")]
+    pub block: u64,
+    #[prost_amino(uint64, tag="2")]
+    #[serde(with = "crate::serializers::from_str", default)]
+    pub app: u64,
+}
+
 
 /// Header defines the structure of a Tendermint block header.
 #[derive(Clone, PartialEq, ::prost_amino_derive::Message)]
@@ -85,7 +185,7 @@ pub struct CommitSig {
 pub struct Header {
     /// basic block info
     #[prost_amino(message, optional, tag="1")]
-    pub version: ::std::option::Option<super::version::Consensus>,
+    pub version: ::std::option::Option<Consensus>,
     #[prost_amino(string, tag="2")]
     pub chain_id: std::string::String,
     #[prost_amino(int64, tag="3")]
@@ -93,7 +193,7 @@ pub struct Header {
     pub height: i64,
     #[prost_amino(message, optional, tag="4")]
     #[serde(with = "crate::serializers::optional")]
-    pub time: ::std::option::Option<super::super::google::protobuf::Timestamp>,
+    pub time: ::std::option::Option<Timestamp>,
     /// prev block info
     #[prost_amino(message, optional, tag="5")]
     pub last_block_id: ::std::option::Option<BlockId>,
